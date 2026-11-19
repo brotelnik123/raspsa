@@ -1,0 +1,318 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Расписание</title>
+    <script src="https://telegram.org/js/telegram-web-app.js"></script>
+    <style>
+        :root {
+            --bg: var(--tg-theme-bg-color, #ffffff);
+            --text: var(--tg-theme-text-color, #000000);
+            --hint: var(--tg-theme-hint-color, #999999);
+            --button: var(--tg-theme-button-color, #2481cc);
+            --button-text: var(--tg-theme-button-text-color, #ffffff);
+            --card-bg: var(--tg-theme-secondary-bg-color, #f1f1f1);
+            --green: #2ecc71;
+        }
+        * { box-sizing: border-box; }
+        body {
+            margin: 0;
+            padding: 16px;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            transition: background 0.2s, color 0.2s;
+        }
+        h1 { font-size: 20px; margin: 0 0 12px; }
+        .status {
+            padding: 12px;
+            border-radius: 12px;
+            background: var(--card-bg);
+            margin-bottom: 16px;
+            font-size: 15px;
+            font-weight: 500;
+            min-height: 44px;
+            display: flex;
+            align-items: center;
+        }
+        .groups {
+            display: flex;
+            gap: 8px;
+            flex-wrap: wrap;
+            margin-bottom: 16px;
+        }
+        .group-btn {
+            flex: 1 1 auto;
+            padding: 10px 14px;
+            border: none;
+            border-radius: 10px;
+            background: var(--card-bg);
+            color: var(--text);
+            font-size: 14px;
+            cursor: pointer;
+            transition: background 0.15s;
+        }
+        .group-btn.active {
+            background: var(--button);
+            color: var(--button-text);
+        }
+        .toggle {
+            display: flex;
+            gap: 8px;
+            margin-bottom: 16px;
+        }
+        .toggle button {
+            flex: 1;
+            padding: 10px;
+            border: none;
+            border-radius: 10px;
+            background: var(--card-bg);
+            color: var(--text);
+            font-size: 15px;
+            cursor: pointer;
+        }
+        .toggle button.active {
+            background: var(--button);
+            color: var(--button-text);
+        }
+        .cards { display: flex; flex-direction: column; gap: 12px; }
+        .card {
+            padding: 14px;
+            border-radius: 14px;
+            background: var(--card-bg);
+            transition: opacity 0.2s, box-shadow 0.2s;
+        }
+        .card.passed { opacity: 0.4; }
+        .card.current { box-shadow: 0 0 0 2px var(--green); }
+        .card .num {
+            font-size: 12px;
+            color: var(--hint);
+            margin-bottom: 4px;
+        }
+        .card .subject {
+            font-size: 16px;
+            font-weight: 600;
+            margin-bottom: 6px;
+        }
+        .card .meta {
+            font-size: 14px;
+            color: var(--hint);
+            line-height: 1.5;
+        }
+        .empty { text-align: center; color: var(--hint); padding: 32px 0; }
+    </style>
+</head>
+<body>
+
+<h1>📅 Расписание</h1>
+<div class="status" id="status">Загрузка…</div>
+
+<div class="groups" id="groups"></div>
+
+<div class="toggle">
+    <button data-day="today" class="active" onclick="switchDay('today')">Сегодня</button>
+    <button data-day="tomorrow" onclick="switchDay('tomorrow')">Завтра</button>
+</div>
+
+<div class="cards" id="cards"></div>
+
+<script>
+    const tg = window.Telegram?.WebApp;
+    if (tg) {
+        tg.ready();
+        tg.expand();
+    }
+
+    let schedule = {};
+    let currentGroup = null;
+    let currentDay = 'today'; // 'today' | 'tomorrow'
+    let allCards = []; // для быстрого обновления статусов
+
+    const WEEKDAYS_RU = ['Понедельник','Вторник','Среда','Четверг','Пятница','Суббота','Воскресенье'];
+
+    async function loadSchedule() {
+        const res = await fetch('schedule.json');
+        schedule = await res.json();
+
+        const groupsDiv = document.getElementById('groups');
+        groupsDiv.innerHTML = '';
+        Object.keys(schedule).forEach((g, i) => {
+            const btn = document.createElement('button');
+            btn.className = 'group-btn' + (i === 0 ? ' active' : '');
+            btn.textContent = g;
+            btn.onclick = () => {
+                document.querySelectorAll('.group-btn').forEach(b => b.classList.remove('active'));
+                btn.classList.add('active');
+                currentGroup = g;
+                renderCards();
+                updateStatus();
+            };
+            groupsDiv.appendChild(btn);
+            if (i === 0) currentGroup = g;
+        });
+
+        renderCards();
+        updateStatus();
+    }
+
+    function getDayKey(offset) {
+        const d = new Date();
+        d.setDate(d.getDate() + offset);
+        return WEEKDAYS_RU[d.getDay() === 0 ? 6 : d.getDay() - 1];
+    }
+
+    function getPairsFor(group, dayOffset) {
+        const dayKey = getDayKey(dayOffset);
+        return (schedule[group] && schedule[group][dayKey]) || [];
+    }
+
+    function parseTime(str) {
+        // "09:00" -> Date на сегодня
+        const [h, m] = str.split(':').map(Number);
+        const d = new Date();
+        d.setHours(h, m, 0, 0);
+        return d;
+    }
+
+    function formatPair(pair, index) {
+        let timeStr = `${pair.start}–${pair.end}`;
+        let halves = '';
+        if (pair.half1_start) {
+            halves = `1-я: ${pair.half1_start}–${pair.half1_end} · 2-я: ${pair.half2_start}–${pair.half2_end}`;
+        }
+        return { timeStr, halves };
+    }
+
+    function renderCards() {
+        const container = document.getElementById('cards');
+        const dayOffset = currentDay === 'today' ? 0 : 1;
+        const pairs = getPairsFor(currentGroup, dayOffset);
+        container.innerHTML = '';
+        allCards = [];
+
+        if (!pairs.length) {
+            container.innerHTML = '<div class="empty">Пар нет 🎉</div>';
+            return;
+        }
+
+        pairs.forEach((pair, i) => {
+            const card = document.createElement('div');
+            card.className = 'card';
+            const { timeStr, halves } = formatPair(pair, i);
+            card.innerHTML = `
+                <div class="num">Пара ${i + 1}</div>
+                <div class="subject">${pair.subject}</div>
+                <div class="meta">
+                    ⏰ ${timeStr}<br>
+                    ${halves ? halves + '<br>' : ''}
+                    🚪 ${pair.room}
+                </div>
+            `;
+            container.appendChild(card);
+            allCards.push({ el: card, pair });
+        });
+        updateCardHighlights();
+    }
+
+    function updateCardHighlights() {
+        if (currentDay !== 'today') {
+            allCards.forEach(({ el }) => {
+                el.classList.remove('current', 'passed');
+            });
+            return;
+        }
+        const now = new Date();
+        allCards.forEach(({ el, pair }) => {
+            const start = parseTime(pair.start);
+            const end = parseTime(pair.end);
+            el.classList.remove('current', 'passed');
+            if (now >= start && now <= end) {
+                el.classList.add('current');
+            } else if (now > end) {
+                el.classList.add('passed');
+            }
+        });
+    }
+
+    function updateStatus() {
+        const statusEl = document.getElementById('status');
+        if (!currentGroup) return;
+
+        const dayOffset = currentDay === 'today' ? 0 : 1;
+        const pairs = getPairsFor(currentGroup, dayOffset);
+        if (!pairs.length) {
+            statusEl.textContent = currentDay === 'today' ? 'На сегодня пар нет' : 'На завтра пар нет';
+            return;
+        }
+
+        const now = new Date();
+
+        if (currentDay === 'tomorrow') {
+            // Для завтра показываем просто первую пару
+            const first = pairs[0];
+            statusEl.textContent = `Завтра первая пара: ${first.subject.split(',')[0]} · в ${first.start}`;
+            return;
+        }
+
+        // Сегодня: ищем текущую или следующую
+        let current = null;
+        let next = null;
+        for (const pair of pairs) {
+            const start = parseTime(pair.start);
+            const end = parseTime(pair.end);
+            if (now >= start && now <= end) {
+                current = pair;
+            } else if (now < start && !next) {
+                next = pair;
+            }
+        }
+
+        if (current) {
+            const end = parseTime(current.end);
+            const diff = Math.max(0, Math.floor((end - now) / 1000));
+            const m = Math.floor(diff / 60);
+            const s = diff % 60;
+            statusEl.textContent = `🟢 Идёт: ${current.subject.split(',')[0]} · до конца ${m}:${String(s).padStart(2,'0')}`;
+        } else if (next) {
+            const start = parseTime(next.start);
+            const diff = Math.max(0, Math.floor((start - now) / 1000));
+            const h = Math.floor(diff / 3600);
+            const m = Math.floor((diff % 3600) / 60);
+            const s = diff % 60;
+            let timeStr = '';
+            if (h > 0) timeStr += `${h} ч `;
+            timeStr += `${m} мин ${s} с`;
+            statusEl.textContent = `🔵 Следующая: ${next.subject.split(',')[0]} · через ${timeStr}`;
+        } else {
+            statusEl.textContent = 'На сегодня пар больше нет';
+        }
+    }
+
+    function switchDay(day) {
+        currentDay = day;
+        document.querySelectorAll('.toggle button').forEach(b => {
+            b.classList.toggle('active', b.dataset.day === day);
+        });
+        renderCards();
+        updateStatus();
+    }
+
+    // Живое обновление только статуса и подсветки — раз в секунду
+    setInterval(() => {
+        updateStatus();
+        updateCardHighlights();
+    }, 1000);
+
+    // При возврате в приложение — сразу обновить
+    document.addEventListener('visibilitychange', () => {
+        if (!document.hidden) {
+            updateStatus();
+            updateCardHighlights();
+        }
+    });
+
+    loadSchedule();
+</script>
+</body>
+</html>
